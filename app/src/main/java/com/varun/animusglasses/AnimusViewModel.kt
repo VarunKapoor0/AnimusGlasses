@@ -19,7 +19,6 @@ import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.RegistrationState
-import com.varun.animusglasses.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -38,9 +37,8 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
 
-// API keys loaded from BuildConfig (injected from local.properties — never committed to git)
-private val GEMINI_API_KEY get() = BuildConfig.GEMINI_API_KEY
-private val GROQ_API_KEY get() = BuildConfig.GROQ_API_KEY
+// All API calls route through the Animus backend — no keys in the APK
+private const val BASE_URL = "https://animusai.app"
 
 data class ChatMessage(val role: String, val text: String)
 
@@ -82,6 +80,8 @@ class AnimusViewModel : ViewModel() {
     private var recordingThread: Thread? = null
     private var audioRecord: AudioRecord? = null
     private var isRecordingAudio = false
+
+    // Chat history in Gemini format for the backend
     private val chatHistory = mutableListOf<Map<String, Any>>()
 
     fun onPermissionsGranted(activity: Activity) {
@@ -232,7 +232,7 @@ class AnimusViewModel : ViewModel() {
             Log.e("AnimusVM", "scan() called but lastFrameJpeg is null")
             return
         }
-        Log.d("AnimusVM", "Scanning with JPEG size: ${jpeg.size} bytes")
+        Log.d("AnimusVM", "Scanning, JPEG size: ${jpeg.size} bytes")
         _uiState.update { it.copy(isScanning = true, statusText = "Analyzing...") }
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -259,68 +259,39 @@ class AnimusViewModel : ViewModel() {
         }
     }
 
+    // POST /api/gemini action=vision
     private fun identifyObject(jpegBytes: ByteArray): ObjectPersonality? {
         val base64Image = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
-        Log.d("AnimusVM", "Sending to Gemini, base64 size: ${base64Image.length}")
 
-        val prompt = """You are Animus. Identify the object in this image and give it a personality.
-Respond ONLY with valid JSON in this exact format, no markdown, no code blocks:
-{"object_type":"what the object is","personality_summary":"1 sentence personality","opening_line":"the object's first words under 150 chars","voice":"diana","vocal_direction":"calm"}"""
-
-        val requestBody = JsonObject().apply {
-            add("contents", gson.toJsonTree(listOf(
-                mapOf("role" to "user", "parts" to listOf(
-                    mapOf("text" to prompt),
-                    mapOf("inline_data" to mapOf(
-                        "mime_type" to "image/jpeg",
-                        "data" to base64Image
-                    ))
-                ))
+        val body = JsonObject().apply {
+            addProperty("action", "vision")
+            add("payload", gson.toJsonTree(mapOf(
+                "image" to base64Image,
+                "mimeType" to "image/jpeg"
             )))
         }
 
         val request = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY")
-            .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
+            .url("$BASE_URL/api/gemini")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
         val response = http.newCall(request).execute()
-        val responseBody = response.body?.string() ?: run {
-            Log.e("AnimusVM", "Gemini response body is null, HTTP ${response.code}")
-            return null
-        }
-
-        Log.d("AnimusVM", "Gemini response (${response.code}): ${responseBody.take(500)}")
-
-        if (!response.isSuccessful) {
-            Log.e("AnimusVM", "Gemini HTTP error ${response.code}: $responseBody")
-            return null
-        }
+        val responseBody = response.body?.string() ?: return null
+        Log.d("AnimusVM", "Vision response (${response.code}): ${responseBody.take(300)}")
+        if (!response.isSuccessful) return null
 
         return try {
             val json = gson.fromJson(responseBody, JsonObject::class.java)
-            val text = json
-                .getAsJsonArray("candidates")?.get(0)?.asJsonObject
-                ?.getAsJsonObject("content")
-                ?.getAsJsonArray("parts")?.get(0)?.asJsonObject
-                ?.get("text")?.asString ?: run {
-                Log.e("AnimusVM", "Could not extract text from Gemini response")
-                return null
-            }
-
-            Log.d("AnimusVM", "Gemini text: $text")
-            val cleaned = text.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-            val parsed = gson.fromJson(cleaned, JsonObject::class.java)
-
             ObjectPersonality(
-                objectType = parsed.get("object_type")?.asString ?: return null,
-                personalitySummary = parsed.get("personality_summary")?.asString ?: "",
-                openingLine = parsed.get("opening_line")?.asString ?: "",
-                voice = parsed.get("voice")?.asString ?: "diana",
-                vocalDirection = parsed.get("vocal_direction")?.asString ?: "calm"
-            ).also { Log.d("AnimusVM", "Parsed personality: $it") }
+                objectType = json.get("object_type")?.asString ?: return null,
+                personalitySummary = json.get("personality_summary")?.asString ?: "",
+                openingLine = json.get("opening_line")?.asString ?: "",
+                voice = json.get("voice")?.asString ?: "diana",
+                vocalDirection = json.get("vocal_direction")?.asString ?: "calm"
+            )
         } catch (e: Exception) {
-            Log.e("AnimusVM", "Failed to parse Gemini response: ${e.message}")
+            Log.e("AnimusVM", "Failed to parse vision response: ${e.message}")
             null
         }
     }
@@ -330,29 +301,36 @@ Respond ONLY with valid JSON in this exact format, no markdown, no code blocks:
         _uiState.update { it.copy(isTyping = true, messages = it.messages + ChatMessage("user", text)) }
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // Build history in Gemini format for the backend
                 chatHistory.add(mapOf("role" to "user", "parts" to listOf(mapOf("text" to text))))
-                val systemPrompt = "You are ${personality.objectType}. Personality: ${personality.personalitySummary}. Stay in character. Never say you are an AI. 2 sentences max."
-                val requestBody = JsonObject().apply {
-                    add("system_instruction", gson.toJsonTree(mapOf(
-                        "parts" to listOf(mapOf("text" to systemPrompt))
+
+                val body = JsonObject().apply {
+                    addProperty("action", "chat")
+                    add("payload", gson.toJsonTree(mapOf(
+                        "message" to text,
+                        "history" to chatHistory.dropLast(1), // backend adds latest message itself
+                        "objectType" to personality.objectType,
+                        "personality" to personality.personalitySummary,
+                        "language" to "english"
                     )))
-                    add("contents", gson.toJsonTree(chatHistory))
                 }
+
                 val request = Request.Builder()
-                    .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$GEMINI_API_KEY")
-                    .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
+                    .url("$BASE_URL/api/gemini")
+                    .post(body.toString().toRequestBody("application/json".toMediaType()))
                     .build()
+
                 val response = http.newCall(request).execute()
                 val responseBody = response.body?.string() ?: return@launch
+                Log.d("AnimusVM", "Chat response: ${responseBody.take(300)}")
+
                 val json = gson.fromJson(responseBody, JsonObject::class.java)
-                val replyText = json
-                    .getAsJsonArray("candidates")?.get(0)?.asJsonObject
-                    ?.getAsJsonObject("content")
-                    ?.getAsJsonArray("parts")?.get(0)?.asJsonObject
-                    ?.get("text")?.asString ?: "[no response]"
+                val replyText = json.get("text")?.asString ?: "[no response]"
+
                 chatHistory.add(mapOf("role" to "model", "parts" to listOf(mapOf("text" to replyText))))
                 _uiState.update { it.copy(isTyping = false, messages = it.messages + ChatMessage("assistant", replyText)) }
                 speakText(replyText, personality.voice, personality.vocalDirection)
+
             } catch (e: Exception) {
                 Log.e("AnimusVM", "sendMessage exception: ${e.message}", e)
                 _uiState.update { it.copy(isTyping = false, error = "Message failed: ${e.message}") }
@@ -360,23 +338,23 @@ Respond ONLY with valid JSON in this exact format, no markdown, no code blocks:
         }
     }
 
+    // POST /api/speak — returns WAV binary
     private fun speakText(text: String, voice: String, vocalDirection: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val trimmed = if (text.length > 190) text.substring(0, 187) + "..." else text
-                val input = "[$vocalDirection] $trimmed"
                 val body = JsonObject().apply {
-                    addProperty("model", "canopylabs/orpheus-v1-english")
-                    addProperty("input", input)
+                    addProperty("text", text)
                     addProperty("voice", voice)
-                    addProperty("response_format", "wav")
+                    addProperty("vocal_direction", vocalDirection)
                 }
+
                 val request = Request.Builder()
-                    .url("https://api.groq.com/openai/v1/audio/speech")
-                    .addHeader("Authorization", "Bearer $GROQ_API_KEY")
+                    .url("$BASE_URL/api/speak")
                     .post(body.toString().toRequestBody("application/json".toMediaType()))
                     .build()
+
                 val response = http.newCall(request).execute()
+                Log.d("AnimusVM", "TTS response: ${response.code}")
                 if (response.isSuccessful) {
                     val audioBytes = response.body?.bytes() ?: return@launch
                     playAudio(audioBytes)
@@ -448,16 +426,15 @@ Respond ONLY with valid JSON in this exact format, no markdown, no code blocks:
         audioRecord = null
     }
 
+    // POST /api/transcribe — multipart audio
     private fun transcribeAudio(pcmBytes: ByteArray, sampleRate: Int): String? {
         val wavBytes = pcmToWav(pcmBytes, sampleRate)
         val requestBody = okhttp3.MultipartBody.Builder()
             .setType(okhttp3.MultipartBody.FORM)
-            .addFormDataPart("model", "whisper-large-v3-turbo")
             .addFormDataPart("file", "audio.wav", wavBytes.toRequestBody("audio/wav".toMediaType()))
             .build()
         val request = Request.Builder()
-            .url("https://api.groq.com/openai/v1/audio/transcriptions")
-            .addHeader("Authorization", "Bearer $GROQ_API_KEY")
+            .url("$BASE_URL/api/transcribe")
             .post(requestBody)
             .build()
         val response = http.newCall(request).execute()

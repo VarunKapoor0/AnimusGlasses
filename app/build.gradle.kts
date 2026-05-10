@@ -26,10 +26,6 @@ android {
 
         manifestPlaceholders["mwdat_application_id"] = "944606718413592"
         manifestPlaceholders["mwdat_client_token"] = "AR|944606718413592|596dd40e8694d1c1348bb1316b852396"
-
-        // Inject API keys from local.properties into BuildConfig
-        buildConfigField("String", "GEMINI_API_KEY", "\"${localProperties.getProperty("gemini_api_key", "")}\"")
-        buildConfigField("String", "GROQ_API_KEY", "\"${localProperties.getProperty("groq_api_key", "")}\"")
     }
 
     buildTypes {
@@ -50,7 +46,6 @@ android {
     }
     buildFeatures {
         compose = true
-        buildConfig = true
     }
 }
 
@@ -70,7 +65,7 @@ dependencies {
     implementation(libs.mwdat.camera)
     implementation(libs.mwdat.mockdevice)
 
-    // Networking + JSON for Gemini/Groq API calls
+    // Networking + JSON
     implementation(libs.okhttp)
     implementation(libs.gson)
 
