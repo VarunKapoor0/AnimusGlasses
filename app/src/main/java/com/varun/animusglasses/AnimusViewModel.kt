@@ -9,7 +9,6 @@ import android.util.Base64
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.facebook.fbjni.BuildConfig
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.meta.wearable.dat.camera.addStream
@@ -20,6 +19,7 @@ import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.RegistrationState
+import com.varun.animusglasses.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
