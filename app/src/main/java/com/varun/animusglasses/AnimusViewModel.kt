@@ -9,6 +9,7 @@ import android.util.Base64
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.facebook.fbjni.BuildConfig
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.meta.wearable.dat.camera.addStream
