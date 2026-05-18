@@ -22,7 +22,7 @@ The camera input comes from the glasses. The audio output goes to the glasses sp
 
 ## Demo
 
-Built and demoed on **Meta Ray-Ban Display glasses** (May 2025).
+Built and demoed on **Meta Ray-Ban Display glasses** (May 2026).
 
 - Glasses camera → Gemini Vision → object personality generated
 - Opening line spoken through glasses speakers via Orpheus TTS
